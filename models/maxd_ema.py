@@ -120,6 +120,11 @@ class MaxdEma(ContinualModel):
         if not self.buffer.is_empty():
             buf_inputs, buf_labels, buf_logits1, buf_logits2, _ = self.buffer.get_data(
                 self.args.minibatch_size, transform=self.transform, task_aware=task_aware, cur_task=cur_task)
+            
+            buf_labels = buf_labels.float()
+            buf_logits1 = buf_logits1.float()
+            buf_logits2 = buf_logits2.float()
+
             buf_outputs = self.net(buf_inputs)
             if self.args.supcon_weight > 0:
                 loss_aux_ce = self.args.beta * self.loss(buf_outputs['logits1'], buf_labels) + \
@@ -131,6 +136,11 @@ class MaxdEma(ContinualModel):
             if not exclude_logit_loss:
                 buf_inputs_, buf_labels_, buf_logits1_, buf_logits2_, _ = self.buffer.get_data(
                     self.args.minibatch_size, transform=self.transform, task_aware=task_aware, cur_task=cur_task)
+                
+                buf_labels_ = buf_labels_.float()
+                buf_logits1_ = buf_logits1_.float()
+                buf_logits2_ = buf_logits2_.float()
+
                 buf_outputs_ = self.net(buf_inputs_)
                 ema_outputs = self.ema_model(buf_inputs_)
                 if cross_distill:
