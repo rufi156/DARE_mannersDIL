@@ -27,6 +27,8 @@ from utils.conf import set_random_seed
 
 from torchvision.models import resnet18, ResNet18_Weights
 
+import platform
+
 
 def lecun_fix():
     # Yann moved his website to CloudFlare. You need this now
@@ -79,7 +81,11 @@ def main():
     if args.seed is not None:
         set_random_seed(args.seed)
 
-    args.machine = os.uname()[1]
+    # args.machine = os.uname()[1]
+    try:
+        args.machine = os.uname()[1]
+    except AttributeError:
+        args.machine = platform.node()
 
     if args.model == 'mer': setattr(args, 'batch_size', 1)
     dataset = get_dataset(args)
