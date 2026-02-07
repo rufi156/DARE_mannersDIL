@@ -20,7 +20,7 @@ import math
 import csv
 from tqdm import tqdm
 import numpy as np
-from utils.eval_c import evaluate_natural_robustness
+# from utils.eval_c import evaluate_natural_robustness
 from torch.optim import SGD
 
 import os
@@ -92,7 +92,25 @@ def evaluate_overlap(model: ContinualModel, dataset: ContinualDataset) -> Tuple[
 
 
 def evaluate(model: ContinualModel, dataset: ContinualDataset, last=False, eval_ema=False,
+             ema_model=None, find_overlap=False):
+    """
+    Wrapper that calls either classification or regression evaluation,
+    depending on the dataset.
+    """
+    is_regression = getattr(dataset, "NAME", "") == "custom-hdf5-regression"
+    if is_regression:
+        return evaluate_regression(model, dataset, last=last, eval_ema=eval_ema,
+                                   ema_model=ema_model, find_overlap=find_overlap)
+    else:
+        return evaluate_classification(model, dataset, last=last, eval_ema=eval_ema,
+                                       ema_model=ema_model, find_overlap=find_overlap)
+
+
+# def evaluate(model: ContinualModel, dataset: ContinualDataset, last=False, eval_ema=False,
+#              ema_model=None, find_overlap=False) -> Tuple[list, list]:
+def evaluate_classification(model: ContinualModel, dataset: ContinualDataset, last=False, eval_ema=False,
              ema_model=None, find_overlap=False) -> Tuple[list, list]:
+
     """
     Evaluates the accuracy of the model for each past task.
     :param model: the model to be evaluated
@@ -182,6 +200,74 @@ def evaluate(model: ContinualModel, dataset: ContinualDataset, last=False, eval_
     return accs, accs_mask_classes, avg_acc, voting_acc, confident_acc, second_acc, third_acc
 
 
+def evaluate_regression(model: ContinualModel, dataset: ContinualDataset, last=False, eval_ema=False,
+                        ema_model=None, find_overlap=False):
+    """
+    Regression evaluation: computes per-task mean MSE on logits1 vs labels for
+    multi-output regression datasets (e.g. custom-hdf5-regression).
+
+    Interface is identical to classification evaluate:
+    returns accs, accs_mask_classes, avg_acc, voting_acc, confident_acc, second_acc, third_acc,
+    but accs contains MSE values (lower is better) and the others are zeros.
+    """
+    curr_model = model.net
+    if eval_ema:
+        if ema_model == 'ema_model':
+            print('setting evaluation model to EMA model')
+            curr_model = model.ema_model
+        else:
+            raise NotImplementedError("EMA model type is not recognized")
+
+    status = curr_model.training
+    curr_model.eval()
+
+    accs = []
+    accs_mask_classes = []
+    avg_acc = []
+    voting_acc = []
+    confident_acc = []
+    second_acc = []
+    third_acc = []
+
+    for k, test_loader in enumerate(dataset.test_loaders):
+        if last and k < len(dataset.test_loaders) - 1:
+            continue
+
+        mse_sum = 0.0
+        total = 0
+
+        for data in test_loader:
+            inputs, labels = data
+            inputs, labels = inputs.to(model.device), labels.to(model.device)
+
+            if 'class-il' not in model.COMPATIBILITY:
+                outputs = curr_model(inputs, k)
+            else:
+                outputs = curr_model(inputs)
+
+            if isinstance(outputs, dict):
+                logits1 = outputs['logits1']
+            else:
+                logits1 = outputs
+
+            mse_batch = F.mse_loss(logits1, labels, reduction="sum")
+            mse_sum += mse_batch.item()
+            total += labels.size(0)
+
+        mean_mse = mse_sum / max(total, 1)
+        accs.append(mean_mse)
+        accs_mask_classes.append(0.0)
+        avg_acc.append(0.0)
+        voting_acc.append(0.0)
+        confident_acc.append(0.0)
+        second_acc.append(0.0)
+        third_acc.append(0.0)
+
+    curr_model.train(status)
+    return accs, accs_mask_classes, avg_acc, voting_acc, confident_acc, second_acc, third_acc
+
+
+
 def train_epoch(train_loader, model, epoch, t, args, n_epochs, tb_logger, model_stash, stage):
     loss_a, loss_b, loss_c, loss_aux_ce, loss_aux_logit = 0, 0, 0, 0, 0
 
@@ -219,12 +305,12 @@ def train_epoch(train_loader, model, epoch, t, args, n_epochs, tb_logger, model_
         loss_aux_logit += loss_aux_2
         progress_bar(i, len(train_loader), epoch, t, loss)
 
-        if args.tensorboard:
-            tb_logger.log_stage_loss_('loss_a', loss_a / len(train_loader), n_epochs, epoch, t)
-            tb_logger.log_stage_loss_('loss_b', loss_b / len(train_loader), n_epochs, epoch, t)
-            tb_logger.log_stage_loss_('loss_c', loss_c / len(train_loader), n_epochs, epoch, t)
-            tb_logger.log_stage_loss_('memory_ce_loss', loss_aux_ce / len(train_loader), n_epochs, epoch, t)
-            tb_logger.log_stage_loss_('memory_logit_loss', loss_aux_logit / len(train_loader), n_epochs, epoch, t)
+        # if args.tensorboard:
+        #     tb_logger.log_stage_loss_('loss_a', loss_a / len(train_loader), n_epochs, epoch, t)
+        #     tb_logger.log_stage_loss_('loss_b', loss_b / len(train_loader), n_epochs, epoch, t)
+        #     tb_logger.log_stage_loss_('loss_c', loss_c / len(train_loader), n_epochs, epoch, t)
+        #     tb_logger.log_stage_loss_('memory_ce_loss', loss_aux_ce / len(train_loader), n_epochs, epoch, t)
+        #     tb_logger.log_stage_loss_('memory_logit_loss', loss_aux_logit / len(train_loader), n_epochs, epoch, t)
 
         model_stash['batch_idx'] = i + 1
     model_stash['epoch_idx'] = epoch + 1
@@ -270,10 +356,10 @@ def train(model: ContinualModel, dataset: ContinualDataset,
     for t in range(dataset.N_TASKS):
         model.net.train()
         _, _ = dataset_copy.get_data_loaders(task_id=t)
-    if model.NAME != 'icarl' and model.NAME != 'pnn':
-        random_results_class, random_results_task, _, _, _, _, _ = evaluate(model, dataset_copy)
+    # if model.NAME != 'icarl' and model.NAME != 'pnn':
+    #     random_results_class, random_results_task, _, _, _, _, _ = evaluate(model, dataset_copy)
 
-    print(file=sys.stderr)
+    # print(file=sys.stderr)
     # list to store task 1 accuracies
     if args.log_accuracies:
         task_accuracies = {
@@ -298,19 +384,19 @@ def train(model: ContinualModel, dataset: ContinualDataset,
         train_loader, test_loader = dataset.get_data_loaders(task_id=t)
         if hasattr(model, 'begin_task'):
             model.begin_task(dataset)
-        if t:
-            accs = evaluate(model, dataset, last=True)
-            results[t-1] = results[t-1] + accs[0]
-            if dataset.SETTING == 'class-il':
-                results_mask_classes[t-1] = results_mask_classes[t-1] + accs[1]
+        # if t:
+        #     accs = evaluate(model, dataset, last=True)
+        #     results[t-1] = results[t-1] + accs[0]
+        #     if dataset.SETTING == 'class-il':
+        #         results_mask_classes[t-1] = results_mask_classes[t-1] + accs[1]
 
-            if hasattr(model, 'ema_model'):
-                ema_accs = evaluate(model, dataset, eval_ema=True, ema_model='ema_model', last=True)
-                ema_results['ema_model'][t - 1] = ema_results['ema_model'][t - 1] + ema_accs[0]
+        #     if hasattr(model, 'ema_model'):
+        #         ema_accs = evaluate(model, dataset, eval_ema=True, ema_model='ema_model', last=True)
+        #         ema_results['ema_model'][t - 1] = ema_results['ema_model'][t - 1] + ema_accs[0]
 
-                if dataset.SETTING == 'class-il':
-                    ema_results_mask_classes['ema_model'][t - 1] = ema_results_mask_classes['ema_model'][t - 1] + \
-                                                                 ema_accs[1]
+        #         if dataset.SETTING == 'class-il':
+        #             ema_results_mask_classes['ema_model'][t - 1] = ema_results_mask_classes['ema_model'][t - 1] + \
+        #                                                          ema_accs[1]
 
         n_epochs = args.n_epochs
         b_epochs = math.floor(args.b_percent * n_epochs)
@@ -349,17 +435,17 @@ def train(model: ContinualModel, dataset: ContinualDataset,
                 train_epoch(train_loader=train_loader, model=model, epoch=epoch, t=t, args=args,
                                 n_epochs=n_epochs, tb_logger=tb_logger, model_stash=model_stash, stage=stage)
 
-                if t>=1 and args.log_accuracies:
-                    temp_acc = evaluate(model, dataset)
-                    task_accuracies["acc_task1"].append(temp_acc[0][0])
-                    cur_task_key = f"acc_task{t+1}"
-                    task_accuracies[cur_task_key].append(temp_acc[0][t])
-                    for it in [2,3,4,5,6]:
-                        if it != t+1:
-                            cur_task_key = f"acc_task{it}"
-                            task_accuracies[cur_task_key].append(0)
+                # if t>=1 and args.log_accuracies:
+                #     temp_acc = evaluate(model, dataset)
+                #     task_accuracies["acc_task1"].append(temp_acc[0][0])
+                #     cur_task_key = f"acc_task{t+1}"
+                #     task_accuracies[cur_task_key].append(temp_acc[0][t])
+                #     for it in [2,3,4,5,6]:
+                #         if it != t+1:
+                #             cur_task_key = f"acc_task{it}"
+                #             task_accuracies[cur_task_key].append(0)
 
-                    acc_alltasks.append(np.mean(temp_acc, axis=1)[0])
+                #     acc_alltasks.append(np.mean(temp_acc, axis=1)[0])
 
             if args.each_epoch and (n_epochs-1)%3!=2 and t>0:
                 # one last epoch with derpp loss in case if the last epoch for the task was trained with B or C
@@ -381,75 +467,75 @@ def train(model: ContinualModel, dataset: ContinualDataset,
         if hasattr(model, 'final_finetune') and t == dataset.N_TASKS-1:
             model.final_finetune()
 
-        accs = evaluate(model, dataset)
+        # accs = evaluate(model, dataset)
 
-        # log task 1 accuracies
-        if t == 0 and args.log_accuracies:
-            acc_alltasks.append(accs[0][0])
-            task_accuracies["acc_task1"].append(accs[0][0])
-            task_accuracies["acc_task2"].append(0)
-            task_accuracies["acc_task3"].append(0)
-            task_accuracies["acc_task4"].append(0)
-            task_accuracies["acc_task5"].append(0)
-            task_accuracies["acc_task6"].append(0)
+        # # log task 1 accuracies
+        # if t == 0 and args.log_accuracies:
+        #     acc_alltasks.append(accs[0][0])
+        #     task_accuracies["acc_task1"].append(accs[0][0])
+        #     task_accuracies["acc_task2"].append(0)
+        #     task_accuracies["acc_task3"].append(0)
+        #     task_accuracies["acc_task4"].append(0)
+        #     task_accuracies["acc_task5"].append(0)
+        #     task_accuracies["acc_task6"].append(0)
 
-        if t+1 == dataset.N_TASKS and args.log_accuracies:
-            with open(os.path.join(tb_logger.get_log_dir(), 'task1_accuracies.csv'), 'w') as f:
-                write = csv.writer(f)
-                write.writerow(task_accuracies["acc_task1"])
+        # if t+1 == dataset.N_TASKS and args.log_accuracies:
+        #     with open(os.path.join(tb_logger.get_log_dir(), 'task1_accuracies.csv'), 'w') as f:
+        #         write = csv.writer(f)
+        #         write.writerow(task_accuracies["acc_task1"])
 
-            with open(os.path.join(tb_logger.get_log_dir(), 'task2_accuracies.csv'), 'w') as f:
-                write = csv.writer(f)
-                write.writerow(task_accuracies["acc_task2"])
+        #     with open(os.path.join(tb_logger.get_log_dir(), 'task2_accuracies.csv'), 'w') as f:
+        #         write = csv.writer(f)
+        #         write.writerow(task_accuracies["acc_task2"])
 
-            with open(os.path.join(tb_logger.get_log_dir(), 'task3_accuracies.csv'), 'w') as f:
-                write = csv.writer(f)
-                write.writerow(task_accuracies["acc_task3"])
+        #     with open(os.path.join(tb_logger.get_log_dir(), 'task3_accuracies.csv'), 'w') as f:
+        #         write = csv.writer(f)
+        #         write.writerow(task_accuracies["acc_task3"])
 
-            with open(os.path.join(tb_logger.get_log_dir(), 'task4_accuracies.csv'), 'w') as f:
-                write = csv.writer(f)
-                write.writerow(task_accuracies["acc_task4"])
+        #     with open(os.path.join(tb_logger.get_log_dir(), 'task4_accuracies.csv'), 'w') as f:
+        #         write = csv.writer(f)
+        #         write.writerow(task_accuracies["acc_task4"])
 
-            with open(os.path.join(tb_logger.get_log_dir(), 'task5_accuracies.csv'), 'w') as f:
-                write = csv.writer(f)
-                write.writerow(task_accuracies["acc_task5"])
+        #     with open(os.path.join(tb_logger.get_log_dir(), 'task5_accuracies.csv'), 'w') as f:
+        #         write = csv.writer(f)
+        #         write.writerow(task_accuracies["acc_task5"])
 
-            with open(os.path.join(tb_logger.get_log_dir(), 'task6_accuracies.csv'), 'w') as f:
-                write = csv.writer(f)
-                write.writerow(task_accuracies["acc_task6"])
+        #     with open(os.path.join(tb_logger.get_log_dir(), 'task6_accuracies.csv'), 'w') as f:
+        #         write = csv.writer(f)
+        #         write.writerow(task_accuracies["acc_task6"])
 
-            with open(os.path.join(tb_logger.get_log_dir(), 'all_task_accuracies.csv'), 'w') as f:
-                write = csv.writer(f)
-                write.writerow(acc_alltasks)
+        #     with open(os.path.join(tb_logger.get_log_dir(), 'all_task_accuracies.csv'), 'w') as f:
+        #         write = csv.writer(f)
+        #         write.writerow(acc_alltasks)
 
-        results.append(accs[0])
-        results_mask_classes.append(accs[1])
+        # results.append(accs[0])
+        # results_mask_classes.append(accs[1])
 
-        mean_acc = np.mean(accs, axis=1)
-        print_mean_accuracy(mean_acc, t + 1, dataset.SETTING)
+        # mean_acc = np.mean(accs, axis=1)
+        # print_mean_accuracy(mean_acc, t + 1, dataset.SETTING)
 
-        model_stash['mean_accs'].append(mean_acc)
+        # model_stash['mean_accs'].append(mean_acc)
 
-        if args.tensorboard:
-            # tb_logger.log_accuracy(np.array(accs), mean_acc, args, t)
-            tb_logger.log_all_accuracy(np.array(accs), mean_acc, args, t)
-            csv_logger.log(mean_acc)
+        # if args.tensorboard:
+        #     # tb_logger.log_accuracy(np.array(accs), mean_acc, args, t)
+        #     tb_logger.log_all_accuracy(np.array(accs), mean_acc, args, t)
+        #     csv_logger.log(mean_acc)
 
-        # Evaluate on EMA model
-        if hasattr(model, 'ema_model'):
-            print('=' * 30)
-            print(f'Evaluating ema_model')
-            print('=' * 30)
-            ema_accs = evaluate(model, dataset, eval_ema=True, ema_model='ema_model')
+        # # Evaluate on EMA model
+        # if hasattr(model, 'ema_model'):
+        #     print('=' * 30)
+        #     print(f'Evaluating ema_model')
+        #     print('=' * 30)
+        #     ema_accs = evaluate(model, dataset, eval_ema=True, ema_model='ema_model')
 
-            ema_results['ema_model'].append(ema_accs[0])
-            ema_results_mask_classes['ema_model'].append(ema_accs[1])
-            ema_mean_acc = np.mean(ema_accs, axis=1)
-            print_mean_accuracy(ema_mean_acc, t + 1, dataset.SETTING)
+        #     ema_results['ema_model'].append(ema_accs[0])
+        #     ema_results_mask_classes['ema_model'].append(ema_accs[1])
+        #     ema_mean_acc = np.mean(ema_accs, axis=1)
+        #     print_mean_accuracy(ema_mean_acc, t + 1, dataset.SETTING)
 
-            if args.tensorboard:
-                tb_logger.log_all_accuracy(np.array(ema_accs), ema_mean_acc, args, t, identifier='ema_model_')
-                ema_loggers['ema_model'].log(ema_mean_acc)
+        #     if args.tensorboard:
+        #         tb_logger.log_all_accuracy(np.array(ema_accs), ema_mean_acc, args, t, identifier='ema_model_')
+        #         ema_loggers['ema_model'].log(ema_mean_acc)
 
         if args.plot_results:
             # save task checkpoint
@@ -460,42 +546,42 @@ def train(model: ContinualModel, dataset: ContinualDataset,
                 torch.save(model.net.state_dict(), fname)
 
 
-    if args.tensorboard:
-        tb_logger.close()
-        csv_logger.add_bwt(results, results_mask_classes)
-        csv_logger.add_forgetting(results, results_mask_classes)
+    # if args.tensorboard:
+    #     tb_logger.close()
+    #     csv_logger.add_bwt(results, results_mask_classes)
+    #     csv_logger.add_forgetting(results, results_mask_classes)
 
-        if 'ema_model' in ema_loggers:
-            ema_loggers['ema_model'].add_bwt(ema_results['ema_model'], ema_results_mask_classes['ema_model'])
-            ema_loggers['ema_model'].add_forgetting(ema_results['ema_model'], ema_results_mask_classes['ema_model'])
+    #     if 'ema_model' in ema_loggers:
+    #         ema_loggers['ema_model'].add_bwt(ema_results['ema_model'], ema_results_mask_classes['ema_model'])
+    #         ema_loggers['ema_model'].add_forgetting(ema_results['ema_model'], ema_results_mask_classes['ema_model'])
 
-        if model.NAME != 'icarl' and model.NAME != 'pnn':
-            csv_logger.add_fwt(results, random_results_class,
-                               results_mask_classes, random_results_task)
+    #     if model.NAME != 'icarl' and model.NAME != 'pnn':
+    #         csv_logger.add_fwt(results, random_results_class,
+    #                            results_mask_classes, random_results_task)
 
-        if 'ema_model' in ema_loggers:
-            args_dict = vars(args)
-            args_dict['ema_acc'] = np.mean(ema_accs, axis=1)[0]
-            args_dict['ema_acc_average'] = np.mean(ema_accs, axis=1)[2]
+    #     if 'ema_model' in ema_loggers:
+    #         args_dict = vars(args)
+    #         args_dict['ema_acc'] = np.mean(ema_accs, axis=1)[0]
+    #         args_dict['ema_acc_average'] = np.mean(ema_accs, axis=1)[2]
 
-        sample_counter, overlap_counter, missing_counter = evaluate_overlap(model, dataset)
-        args_dict = vars(args)
-        args_dict['sample_counter'] = sample_counter
-        args_dict['overlap_counter'] = overlap_counter
-        args_dict['missing_counter'] = missing_counter
+    #     sample_counter, overlap_counter, missing_counter = evaluate_overlap(model, dataset)
+    #     args_dict = vars(args)
+    #     args_dict['sample_counter'] = sample_counter
+    #     args_dict['overlap_counter'] = overlap_counter
+    #     args_dict['missing_counter'] = missing_counter
 
-        csv_logger.write(vars(args))
-        save_task_perf(task_perf_path, results, dataset.N_TASKS)
+    #     csv_logger.write(vars(args))
+    #     save_task_perf(task_perf_path, results, dataset.N_TASKS)
 
-        if 'ema_model' in ema_loggers:
-            ema_loggers['ema_model'].write(vars(args))
-            save_task_perf(ema_task_perf_paths['ema_model'], ema_results['ema_model'], dataset.N_TASKS)
+    #     if 'ema_model' in ema_loggers:
+    #         ema_loggers['ema_model'].write(vars(args))
+    #         save_task_perf(ema_task_perf_paths['ema_model'], ema_results['ema_model'], dataset.N_TASKS)
 
     # store mse_distances between buffered representations
-    if args.calculate_drift:
-        with open(os.path.join(tb_logger.get_log_dir(), 'mse_distances.csv'), 'w') as f:
-            write = csv.writer(f)
-            write.writerow(model.drift)
+    # if args.calculate_drift:
+    #     with open(os.path.join(tb_logger.get_log_dir(), 'mse_distances.csv'), 'w') as f:
+    #         write = csv.writer(f)
+    #         write.writerow(model.drift)
 
     # save checkpoint
     fname = os.path.join(tb_logger.get_log_dir(), 'checkpoint.pth')
@@ -504,6 +590,6 @@ def train(model: ContinualModel, dataset: ContinualDataset,
     elif args.plot_results:
         torch.save(model.net.state_dict(), fname)
 
-    # evaluate natural corruption
-    if args.eval_c:
-        evaluate_natural_robustness(model.net, tb_logger.get_log_dir())
+    # # evaluate natural corruption
+    # if args.eval_c:
+    #     evaluate_natural_robustness(model.net, tb_logger.get_log_dir())
