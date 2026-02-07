@@ -23,6 +23,7 @@ from datasets.domain_cifar10 import DomainCIFAR10
 from datasets.domain_cifar100 import DomainCIFAR100
 from datasets.domain_net import DomainNet
 from datasets.super_cifar100 import SuperCIFAR100
+from datasets.custom_hdf5_regression import CustomHDF5Regression
 
 NAMES = {
     PermutedMNIST.NAME: PermutedMNIST,
@@ -42,6 +43,7 @@ NAMES = {
     DomainCIFAR100.NAME: DomainCIFAR100,
     DomainNet.NAME: DomainNet,
     SuperCIFAR100.NAME: SuperCIFAR100,
+    CustomHDF5Regression.NAME: CustomHDF5Regression,
 }
 
 GCL_NAMES = {
