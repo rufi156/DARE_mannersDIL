@@ -30,7 +30,7 @@ def create_stash(model: nn.Module, args: Namespace,
 
     if 'buffer_size' in vars(args).keys():
         name_parts.append('buf_' + str(args.buffer_size))
-    name_parts.append(now.strftime("%Y%m%d_%H%M%S_%f"))
+    name_parts.append(now.strftime(f"{args.experiment_id}_%Y%m%d_%H%M%S_%f"))
     model_stash['model_name'] = '/'.join(name_parts)
     model_stash['mean_accs'] = []
     model_stash['args'] = args

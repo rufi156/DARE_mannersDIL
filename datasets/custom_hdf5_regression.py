@@ -83,7 +83,7 @@ class HDF5CLDataset(Dataset):
         labels_np = labels_ds[idx]
         labels = torch.tensor(labels_np, dtype=torch.float32)
 
-        if self.split == "test":
+        if self.split == "val":
             return img, labels
         else:
             return img, labels, not_aug_img
@@ -104,18 +104,24 @@ class CustomHDF5Regression(ContinualDataset):
     DOMAIN_LST = ['Home', 'BigOffice-2', 'BigOffice-3',
                   'Hallway', 'MeetingRoom', 'SmallOffice']
     
-    # resize_64 = transforms.Resize((IMG_SIZE, IMG_SIZE))
-    # TRANSFORM = [resize_64]
-    # TRANSFORM_NORM = [resize_64]
-    # TRANSFORM_TEST = [resize_64]
-    # NOT_AUG_TRANSFORM = [resize_64]
-    TRANSFORM = []
-    TRANSFORM_NORM = []
-    TRANSFORM_TEST = []
-    NOT_AUG_TRANSFORM = []
+    def __init__(self, args):
+        self.train_loader = None
+        self.test_loaders = []
+        self.i = 0
+        self.args = args
 
-    data_path = base_data_path()  # adjust folder if needed
-    hdf5_path = os.path.join(data_path, "mean_data_pepper_fold0.hdf5")
+        resize = transforms.Resize((90,160))
+        self.TRANSFORM = [resize]
+        self.TRANSFORM_NORM = [resize]
+        self.TRANSFORM_TEST = [resize]
+        self.NOT_AUG_TRANSFORM = [resize]
+        
+        data_path = base_data_path()
+        exp_id = self.args.experiment_id
+        dataset_fold_suffix = exp_id.split("_")[-1]
+        dataset_fold_suffix = '_'+dataset_fold_suffix if 'fold' in dataset_fold_suffix else ''
+        self.hdf5_path = os.path.join(data_path, f"mean_data_pepper{dataset_fold_suffix}.hdf5")
+        print(f"Training on {self.hdf5_path}")
 
 
     def get_data_loaders(self, task_id=None):
@@ -143,7 +149,7 @@ class CustomHDF5Regression(ContinualDataset):
         test_dataset = HDF5CLDataset(
             hdf5_path=self.hdf5_path,
             domain=current_domain,
-            split="test",
+            split="val",
             img_variant="image_path",
             transform=test_transform,
             not_aug_transform=None
